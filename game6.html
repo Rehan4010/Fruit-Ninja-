@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fruit Slicer - 60FPS Performance Mode</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@600;900&display=swap');
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a1c2c; /* Simplified background */
+            font-family: 'Poppins', sans-serif;
+            user-select: none;
+            touch-action: none;
+            cursor: crosshair;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        /* Clean UI (Hardware Accelerated) */
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 10px 20px;
+            border-radius: 12px;
+            pointer-events: none;
+        }
+
+        .score-row {
+            color: #fff;
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        #score-val {
+            font-size: 32px;
+            font-weight: 900;
+            color: #00f2fe;
+        }
+
+        .combo-text {
+            color: #ff9a9e;
+            font-size: 16px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .combo-active {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div class="score-row">SCORE: <span id="score-val">0</span></div>
+        <div id="combo" class="combo-text">Combo x<span id="combo-val">1</span>!</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false }); // alpha:false optimizes background rendering
+        let width, height;
+        let score = 0;
+        let combo = 0;
+        let comboTimer = 0;
+
+        // Optimized Canvas Scaling (Caps at 1.5 to prevent extreme lag on Retina/High-DPI screens)
+        function setupCanvas() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            ctx.scale(dpr, dpr);
+        }
+        window.addEventListener('resize', setupCanvas);
+        setupCanvas();
+
+        const fruitsData = [
+            { emoji: '🍉', color: '#ff4757' },
+            { emoji: '🍊', color: '#ffa502' },
+            { emoji: '🥝', color: '#2ed573' },
+            { emoji: '🫐', color: '#3742fa' },
+            { emoji: '🥭', color: '#eccc68' }
+        ];
+
+        let entities = [];
+        let particles = [];
+        let slicedHalves = [];
+        let bladeTrail = [];
+        let isSlicing = false;
+
+        function updatePointer(e) {
+            if (!isSlicing) return;
+            const x = e.touches ? e.touches[0].clientX : e.clientX;
+            const y = e.touches ? e.touches[0].clientY : e.clientY;
+            bladeTrail.push({ x, y, life: 1.0 });
+            
+            // Keep trail short for performance
+            if (bladeTrail.length > 10) bladeTrail.shift();
+            checkSlices(x, y);
+        }
+
+        window.addEventListener('mousedown', (e) => { isSlicing = true; bladeTrail = []; updatePointer(e); });
+        window.addEventListener('mousemove', updatePointer);
+        window.addEventListener('mouseup', () => { isSlicing = false; });
+        
+        window.addEventListener('touchstart', (e) => { isSlicing = true; bladeTrail = []; updatePointer(e); });
+        window.addEventListener('touchmove', updatePointer);
+        window.addEventListener('touchend', () => { isSlicing = false; });
+
+        class Fruit {
+            constructor() {
+                this.radius = 40;
+                this.x = Math.random() * (width - 100) + 50;
+                this.y = height + 50;
+                const targetX = width / 2 + (Math.random() - 0.5) * 200;
+                this.vx = (targetX - this.x) * 0.015;
+                this.vy = -(Math.random() * 5 + 17);
+                
+                const data = fruitsData[Math.floor(Math.random() * fruitsData.length)];
+                this.emoji = data.emoji;
+                this.color = data.color;
+                
+                this.rotation = Math.random() * Math.PI * 2;
+                this.rotSpeed = (Math.random() - 0.5) * 0.1;
+                this.isSliced = false;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.3; 
+                this.rotation += this.rotSpeed;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                ctx.font = '60px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.emoji, 0, 0); // Removed heavy shadow
+                ctx.restore();
+            }
+        }
+
+        class SlicedHalf {
+            constructor(x, y, vx, vy, emoji, isTop) {
+                this.x = x;
+                this.y = y;
+                this.vx = vx + (isTop ? -2 : 2);
+                this.vy = vy + (isTop ? -2 : 2);
+                this.emoji = emoji;
+                this.rotation = 0;
+                this.rotSpeed = (isTop ? -0.1 : 0.1);
+                this.isTop = isTop;
+                this.alpha = 1;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.4;
+                this.rotation += this.rotSpeed;
+                this.alpha -= 0.015;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, this.alpha);
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                
+                ctx.beginPath();
+                if (this.isTop) ctx.rect(-50, -50, 100, 50);
+                else ctx.rect(-50, 0, 100, 50);   
+                ctx.clip();
+
+                ctx.font = '60px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.emoji, 0, 0);
+                ctx.restore();
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 6 + 2;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.color = color;
+                this.size = Math.random() * 6 + 2;
+                this.life = 1;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.2;
+                this.size *= 0.95;
+                this.life -= 0.04;
+            }
+
+            draw() {
+                ctx.globalAlpha = Math.max(0, this.life);
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1; // Reset alpha
+            }
+        }
+
+        function updateUI() {
+            document.getElementById('score-val').innerText = score;
+            const comboEl = document.getElementById('combo');
+            const comboVal = document.getElementById('combo-val');
+            
+            if (combo > 1) {
+                comboVal.innerText = combo;
+                comboEl.classList.add('combo-active');
+            } else {
+                comboEl.classList.remove('combo-active');
+            }
+        }
+
+        function checkSlices(x, y) {
+            for (let i = entities.length - 1; i >= 0; i--) {
+                let f = entities[i];
+                let dist = Math.hypot(f.x - x, f.y - y);
+                
+                if (dist < f.radius && !f.isSliced) {
+                    f.isSliced = true;
+                    
+                    combo++;
+                    comboTimer = 50; 
+                    score += 10 * combo;
+                    updateUI();
+
+                    slicedHalves.push(new SlicedHalf(f.x, f.y, f.vx, f.vy, f.emoji, true));
+                    slicedHalves.push(new SlicedHalf(f.x, f.y, f.vx, f.vy, f.emoji, false));
+
+                    // Reduced particle count for performance
+                    for (let p = 0; p < 10; p++) {
+                        particles.push(new Particle(f.x, f.y, f.color));
+                    }
+
+                    entities.splice(i, 1);
+                }
+            }
+        }
+
+        function drawBlade() {
+            if (bladeTrail.length < 2) return;
+
+            ctx.beginPath();
+            ctx.moveTo(bladeTrail[0].x, bladeTrail[0].y);
+            
+            for (let i = 1; i < bladeTrail.length; i++) {
+                ctx.lineTo(bladeTrail[i].x, bladeTrail[i].y);
+            }
+            
+            ctx.strokeStyle = 'rgba(0, 242, 254, 0.8)';
+            ctx.lineWidth = 5;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+
+            for (let i = 0; i < bladeTrail.length; i++) {
+                bladeTrail[i].life -= 0.15;
+            }
+            bladeTrail = bladeTrail.filter(pt => pt.life > 0);
+        }
+
+        function animate() {
+            // Faster background clear without transparency
+            ctx.fillStyle = '#1a1c2c';
+            ctx.fillRect(0, 0, width, height);
+
+            if (comboTimer > 0) {
+                comboTimer--;
+            } else {
+                combo = 0;
+                updateUI();
+            }
+
+            if (Math.random() < 0.03) {
+                entities.push(new Fruit());
+            }
+
+            for (let i = entities.length - 1; i >= 0; i--) {
+                let f = entities[i];
+                f.update();
+                f.draw();
+                if (f.y > height + 100) entities.splice(i, 1);
+            }
+
+            for (let i = slicedHalves.length - 1; i >= 0; i--) {
+                let s = slicedHalves[i];
+                s.update();
+                s.draw();
+                if (s.alpha <= 0 || s.y > height + 100) slicedHalves.splice(i, 1);
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.update();
+                p.draw();
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            drawBlade();
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
